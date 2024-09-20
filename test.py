@@ -14,7 +14,7 @@ import base64
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt 
-import httpx
+#import httpx
 import time 
 from pydantic import BaseModel
 from datetime import datetime
@@ -22,25 +22,152 @@ import json
 from ultralytics import YOLO 
 from PIL import Image
 
+# FastAPI and other imports
+from fastapi import FastAPI, HTTPException, Depends, status, Form
+from fastapi.responses import RedirectResponse
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from typing import Annotated
+from fastapi.staticfiles import StaticFiles
+
+import models
+from database import engine, SessionLocal
 
 app = FastAPI()
 
-# For templates (HTML rendering)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Create tables in the database
+models.Base.metadata.create_all(bind=engine)
+
+# # For templates (HTML rendering)
+# app.mount("/static", StaticFiles(directory="static"), name="static")
+# templates = Jinja2Templates(directory="templates")
+
+# # Fake in-memory user storage
+# fake_user_db = {
+#     "user1": {"username": "user1", "password": "password1"},
+#     "user2": {"username": "user2", "password": "password2"},
+#     "user3": {"username": "user3", "password": "password3"},
+#     "user4": {"username": "user4", "password": "password4"},
+#     "user5": {"username": "user5", "password": "password5"},
+#     "admin": {"username": "admin", "password": "adminpass"}
+# }
+# current_user = None
+
+
+# Pydantic models
+class MarksheetBase(BaseModel):
+    username: str
+    password: str
+    marks: int
+    strikes: int
+
+class UserBase(BaseModel):
+    username: str
+    password: str
+
+# Dependency for database session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+db_dependency = Annotated[Session, Depends(get_db)]
+
+# Route to create a user with error handling
+@app.post("/users/", status_code=status.HTTP_201_CREATED)
+async def create_user(user: UserBase, db: db_dependency):
+    existing_user = db.query(models.User).filter(
+        (models.User.username == user.username) | (models.User.password == user.password)
+    ).first()
+
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this username or password already exists")
+
+    # Create a new user entry in the database
+    new_user = models.User(username=user.username, password=user.password)
+    db.add(new_user)
+    db.commit()
+    return new_user
+
+# Route to fetch user information based on username and password
+@app.get("/users/{username}", status_code=status.HTTP_200_OK)
+async def read_user(username: str, password: str, db: db_dependency):
+    user = db.query(models.User).filter(
+        models.User.username == username,
+        models.User.password == password
+    ).first()
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+# Set up templates directory
 templates = Jinja2Templates(directory="templates")
 
-# Fake in-memory user storage
-fake_user_db = {
-    "user1": {"username": "user1", "password": "password1"},
-    "user2": {"username": "user2", "password": "password2"},
-    "user3": {"username": "user3", "password": "password3"},
-    "user4": {"username": "user4", "password": "password4"},
-    "user5": {"username": "user5", "password": "password5"},
-    "admin": {"username": "admin", "password": "adminpass"}
-}
+# Global variable to store the current user
 current_user = None
 
-user_cheating_data = {user: [] for user in fake_user_db if user != "admin"}
+# Login route (POST)
+@app.post("/login")
+async def login(
+    username: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    global current_user
+    user = db.query(models.User).filter(
+        models.User.username == username,
+        models.User.password == password
+    ).first()
+    
+    if user:
+        current_user = username  # Store the user's username in the global variable
+        if username == "admin" and password == "admin":
+            return RedirectResponse(url="/teachersMain", status_code=302)  # Redirect to admin page
+        return RedirectResponse(url="/dashboard", status_code=302)
+    
+    return templates.TemplateResponse("login.html", {"request": Request, "msg": "Invalid credentials"})
+
+# Dashboard route (GET)
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    if current_user:
+        return templates.TemplateResponse("dashboard.html", {"request": request, "user": current_user})
+    return RedirectResponse(url="/")
+
+# Admin route (GET)
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_dashboard(request: Request):
+    if current_user == "admin":
+        db: Session = SessionLocal()
+        try:
+            users = db.query(models.User.username).filter(models.User.username != "admin").distinct().all()
+            users = [user.username for user in users]
+        finally:
+            db.close()
+        return templates.TemplateResponse("admin.html", {"request": request, "users": users})
+    return RedirectResponse(url="/")
+
+# Serve static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Extracting data from database
+def initialize_user_cheating_data():
+    db: Session = SessionLocal()
+    try:
+        users = db.query(models.User.username).filter(models.User.username != "admin").distinct().all()
+        user_cheating_data = {user.username: [] for user in users}
+    finally:
+        db.close()
+    return user_cheating_data
+
+# Initialize user_cheating_data
+user_cheating_data = initialize_user_cheating_data()
+
+#user_cheating_data = {user: [] for user in fake_user_db if user != "admin"}
 
 # Face tracking setup
 mp_face_mesh = mp.solutions.face_mesh
@@ -362,15 +489,15 @@ async def get_how_it_works(request: Request):
 async def login_page(request: Request):
     return templates.TemplateResponse("login.html", {"request": request})
 
-@app.post("/login")
-async def login(username: str = Form(...), password: str = Form(...)):
-    if username in fake_user_db and password == fake_user_db[username]["password"]:
-        global current_user
-        current_user = username
-        if username == "admin":
-            return RedirectResponse(url="/admin", status_code=302)
-        return RedirectResponse(url="/dashboard", status_code=302)
-    return {"message": "Invalid credentials"}
+# @app.post("/login")
+# async def login(username: str = Form(...), password: str = Form(...)):
+#     if username in fake_user_db and password == fake_user_db[username]["password"]:
+#         global current_user
+#         current_user = username
+#         if username == "admin":
+#             return RedirectResponse(url="/admin", status_code=302)
+#         return RedirectResponse(url="/dashboard", status_code=302)
+#     return {"message": "Invalid credentials"}
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request):
@@ -378,12 +505,19 @@ async def dashboard(request: Request):
         return templates.TemplateResponse("dashboard.html", {"request": request, "user": current_user})
     return RedirectResponse(url="/")
 
-@app.get("/admin", response_class=HTMLResponse)
-async def admin_dashboard(request: Request):
-    if current_user == "admin":
-        users = [u for u in fake_user_db if u != "admin"]
-        return templates.TemplateResponse("admin.html", {"request": request, "users": users})
+
+@app.get("/teachersMain", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    if current_user:
+        return templates.TemplateResponse("teachersMain.html", {"request": request, "user": current_user})
     return RedirectResponse(url="/")
+
+# @app.get("/admin", response_class=HTMLResponse)
+# async def admin_dashboard(request: Request):
+#     if current_user == "admin":
+#         users = [u for u in fake_user_db if u != "admin"]
+#         return templates.TemplateResponse("admin.html", {"request": request, "users": users})
+#     return RedirectResponse(url="/")
 
 @app.get("/admin/user/{username}")
 async def admin_user_dashboard(username: str):
