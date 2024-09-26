@@ -32,6 +32,12 @@ from models import User  # Import the User class, not the table name
 
 from database import engine, SessionLocal
 
+import cv2
+import os
+from deepface import DeepFace
+import time
+import threading
+
 app = FastAPI()
 
 # Create tables in the database
@@ -202,7 +208,7 @@ audio_detection_active = False
 stream = None  # Initialize stream variable
 # time_remaining = 0
 
-total_time = 60
+total_time = 100
 start_time = None
 cheating_data = []
 
@@ -326,9 +332,53 @@ def predict_anti_spoofing(image):
             return f"{anti_spoofing_model.names[probs.top1]}", probs.top1conf.item()
     return "Unknown", 0.0
 
+class FaceVerifier:
+    def __init__(self, reference_image_path):
+        self.reference_image_path = reference_image_path
+        self.result = {"is_match": None, "timestamp": 0}
+        self.lock = threading.Lock()
+        self.verification_timeout = 2  # Timeout after 2 seconds
+
+    def verify_face(self, frame):
+        try:
+            start_time = time.time()
+            result = DeepFace.verify(frame, self.reference_image_path, enforce_detection=False)
+            verification_time = time.time() - start_time
+            print(f"Face verification completed in {verification_time:.2f} seconds")
+            
+            with self.lock:
+                self.result = {"is_match": result["verified"], "timestamp": time.time()}
+        except Exception as e:
+            print(f"Error in face verification: {str(e)}")
+            with self.lock:
+                self.result = {"is_match": None, "timestamp": time.time()}
+
+    def get_result(self):
+        with self.lock:
+            if time.time() - self.result["timestamp"] > self.verification_timeout:
+                return None
+            return self.result["is_match"]
+        
 def generate_video_feed(username):
     global eye_cheating, head_cheating, video_feed_active, multiple_persons_detected, book_detected, phone_detected, start_time, video_cap
     video_cap = cv.VideoCapture(0)
+
+    data_folder = "Test\Data\Adarsha"
+    reference_image_path = os.path.join(data_folder, "WIN_20240925_21_59_58_Pro.jpg")
+
+# Check if the reference image exists
+    if not os.path.exists(reference_image_path):
+        print(f"Reference image not found at {reference_image_path}")
+        exit()
+
+    # Initialize FaceVerifier
+    face_verifier = FaceVerifier(reference_image_path)
+
+# Variables for face verification
+    last_verification_time = 0
+    verification_interval = 1  # Verify every 1 second
+    verification_thread = None
+
     with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5) as face_mesh:
         while video_feed_active:
             ret, frame = video_cap.read()
@@ -337,6 +387,31 @@ def generate_video_feed(username):
             frame = cv.flip(frame, 1)
             frame_rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
             img_h, img_w = frame.shape[:2]
+
+
+            current_time = time.time()
+
+    # Perform face verification at intervals
+            if (current_time - last_verification_time > verification_interval and 
+                (verification_thread is None or not verification_thread.is_alive())):
+                verification_thread = threading.Thread(target=face_verifier.verify_face, args=(frame.copy(),))
+                verification_thread.start()
+                last_verification_time = current_time
+                print("Started new verification thread")
+
+
+    # Get the latest result
+            is_match = face_verifier.get_result()
+
+    # Display the result on the frame
+            if is_match is True:
+                cv2.putText(frame, "Match!", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            elif is_match is False:
+                cv2.putText(frame, "No Match", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            else:
+                cv2.putText(frame, "Verifying...", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+
+
 
             detect_objects(frame)
 
@@ -423,7 +498,7 @@ def generate_video_feed(username):
                 p2 = (int(nose_2d[0] + y * 10), int(nose_2d[1] - x * 10))
 
                 # cv.line(frame, p1, p2, (255, 0, 0), 3)
-                # cv.putText(frame, text, (20, 100), cv.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
+                # cv.putText(frame, text, (20, 100), cv.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2
 
                 cheating_votes = sum([
                     eye_cheating, 

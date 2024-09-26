@@ -76,8 +76,6 @@ class FaceVerifier:
 
 # Initialize the webcam
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 # Path to the folder containing the reference image
 data_folder = "Data\Adarsha"
@@ -93,7 +91,7 @@ face_verifier = FaceVerifier(reference_image_path)
 
 # Variables for face verification
 last_verification_time = 0
-verification_interval = 1.0  # Verify every 1 second
+verification_interval = 0.25  # Verify every 1 second
 verification_thread = None
 
 while True:
