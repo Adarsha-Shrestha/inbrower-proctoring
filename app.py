@@ -14,53 +14,20 @@ import base64
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt 
-import httpx
-import time 
 from pydantic import BaseModel
 from datetime import datetime
-import json
 from ultralytics import YOLO 
 from PIL import Image
-
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Annotated
-from fastapi.staticfiles import StaticFiles
-
 import models
 from models import User  # Import the User class, not the table name
-
 from database import engine, SessionLocal
 
 app = FastAPI()
 
 # Create tables in the database
 models.Base.metadata.create_all(bind=engine)
-
-# For templates (HTML rendering)
-# app.mount("/static", StaticFiles(directory="static"), name="static")
-# templates = Jinja2Templates(directory="templates")
-
-# # Fake in-memory user storage
-# fake_user_db = {
-#     "user1": {"username": "user1", "password": "password1"},
-#     "user2": {"username": "user2", "password": "password2"},
-#     "user3": {"username": "user3", "password": "password3"},
-#     "user4": {"username": "user4", "password": "password4"},
-#     "user5": {"username": "user5", "password": "password5"},
-#     "admin": {"username": "admin", "password": "adminpass"}
-# }
-# current_user = None
-
-# user_cheating_data = {user: [] for user in fake_user_db if user != "admin"}
-
-# Pydantic models
-class MarksheetBase(BaseModel):
-    username: str
-    password: str
-    marks: int
-    strikes: int
-
 class UserBase(BaseModel):
     username: str
     password: str
@@ -75,99 +42,40 @@ def get_db():
 
 db_dependency = Annotated[Session, Depends(get_db)]
 
-# Route to create a user with error handling
-@app.post("/users/", status_code=status.HTTP_201_CREATED)
-async def create_user(user: UserBase, db: db_dependency):
-    existing_user = db.query(models.User).filter(
-        (models.User.username == user.username) | (models.User.password == user.password)
-    ).first()
-
-    if existing_user:
-        raise HTTPException(status_code=400, detail="User with this username or password already exists")
-
-    # Create a new user entry in the database
-    new_user = models.User(username=user.username, password=user.password)
-    db.add(new_user)
-    db.commit()
-    return new_user
-
-@app.post("/add_student")
-async def add_student(request:Request,username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
-    # Check if the user already exists
-    existing_user = db.query(User).filter(User.username == username).first()  # Use 'User' class here
-    if existing_user:
-        return {"error": "User already exists"}
-    
-    # Add the new user
-    new_user = User(username=username, password=password)  # Use 'User' class here
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    
-    return templates.TemplateResponse("studentsList.html", {"request": request})
-
-
-# Route to fetch user information based on username and password
-@app.get("/users/{username}", status_code=status.HTTP_200_OK)
-async def read_user(username: str, password: str, db: db_dependency):
-    user = db.query(models.User).filter(
-        models.User.username == username,
-        models.User.password == password
-    ).first()
-
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
-
 # Set up templates directory
 templates = Jinja2Templates(directory="templates")
-
-# Global variable to store the current user
-current_user = None
-
-# Login route (POST)
-@app.post("/login")
-async def login(
-    username: str = Form(...),
-    password: str = Form(...),
-    db: Session = Depends(get_db)
-):
-    global current_user
-    user = db.query(models.User).filter(
-        models.User.username == username,
-        models.User.password == password
-    ).first()
-    
-    if user:
-        current_user = username  # Store the user's username in the global variable
-        if username == "admin" and password == "admin":
-            return RedirectResponse(url="/teachersMain", status_code=302)  # Redirect to admin page
-        return RedirectResponse(url="/dashboard", status_code=302)
-    
-    return templates.TemplateResponse("login.html", {"request": Request, "msg": "Invalid credentials"})
-
-# Dashboard route (GET)
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(request: Request):
-    if current_user:
-        return templates.TemplateResponse("dashboard.html", {"request": request, "user": current_user})
-    return RedirectResponse(url="/")
-
-# Admin route (GET)
-@app.get("/admin", response_class=HTMLResponse)
-async def admin_dashboard(request: Request):
-    if current_user == "admin":
-        db: Session = SessionLocal()
-        try:
-            users = db.query(models.User.username).filter(models.User.username != "admin").distinct().all()
-            users = [user.username for user in users]
-        finally:
-            db.close()
-        return templates.TemplateResponse("admin.html", {"request": request, "users": users})
-    return RedirectResponse(url="/")
-
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Global variables
+current_user = None
+eye_cheating = False
+head_cheating = False
+video_feed_active = False
+video_cap = None
+sound_detected = False
+audio_detection_active = False
+stream = None  # Initialize stream variable
+total_time = 100
+start_time = None
+cheating_data = []
+
+# Face tracking setup
+mp_face_mesh = mp.solutions.face_mesh
+RIGHT_IRIS = [474, 475, 476, 477]
+LEFT_IRIS = [469, 470, 471, 472]
+L_H_LEFT = [33]
+L_H_RIGHT = [133]
+R_H_LEFT = [362]
+R_H_RIGHT = [263]
+
+# Yolo Model Setup
+yolo_model = YOLO('yolov8m.pt')
+class_names = ['person', 'book', 'cell phone']
+class_indices = [i for i, name in yolo_model.names.items() if name in class_names]
+multiple_persons_detected = False
+book_detected = False
+phone_detected = False
 
 # Extracting data from database
 def initialize_user_cheating_data():
@@ -181,38 +89,6 @@ def initialize_user_cheating_data():
 
 # Initialize user_cheating_data
 user_cheating_data = initialize_user_cheating_data()
-
-# Face tracking setup
-mp_face_mesh = mp.solutions.face_mesh
-
-RIGHT_IRIS = [474, 475, 476, 477]
-LEFT_IRIS = [469, 470, 471, 472]
-L_H_LEFT = [33]
-L_H_RIGHT = [133]
-R_H_LEFT = [362]
-R_H_RIGHT = [263]
-
-eye_cheating = False
-head_cheating = False
-# sound_detected = False
-video_feed_active = False
-video_cap = None
-sound_detected = False
-audio_detection_active = False
-stream = None  # Initialize stream variable
-# time_remaining = 0
-
-total_time = 60
-start_time = None
-cheating_data = []
-
-yolo_model = YOLO('yolov8m.pt')
-class_names = ['person', 'book', 'cell phone']
-class_indices = [i for i, name in yolo_model.names.items() if name in class_names]
-
-multiple_persons_detected = False
-book_detected = False
-phone_detected = False
 
 def detect_objects(frame):
     global multiple_persons_detected, book_detected, phone_detected
@@ -235,10 +111,7 @@ def detect_objects(frame):
     multiple_persons_detected = person_count > 1
 
 def eucidiean_distance(point1, point2):
-    x1, y1 = point1.ravel()
-    x2, y2 = point2.ravel()
-    distance = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-    return distance
+    return np.linalg.norm(point1 - point2)
 
 def iris_position(iris_center, right_point, left_point):
     center_to_right = eucidiean_distance(iris_center, right_point)
@@ -259,7 +132,7 @@ def detect_sound():
     CHANNELS = 1              # Mono channel
     RATE = 44100              # Sampling rate (44.1kHz)
     CHUNK = 1024              # Number of samples per chunk
-    THRESHOLD = 1000           # Adjust this value based on your environment
+    THRESHOLD = 500           # Adjust this value based on your environment
 
     # Initialize PyAudio object
     p = pyaudio.PyAudio()
@@ -274,7 +147,7 @@ def detect_sound():
     print("Listening for sound...")
 
     try:
-        while True:
+        while audio_detection_active:
             # Read audio data from the stream
             data = np.frombuffer(stream.read(CHUNK), dtype=np.int16)
 
@@ -295,7 +168,6 @@ def detect_sound():
     # Stop and close the stream
     stream.stop_stream()
     stream.close()
-
     # Terminate PyAudio object
     p.terminate()
 
@@ -331,10 +203,8 @@ def generate_video_feed(username):
     video_cap = cv.VideoCapture(0)
     
     # New variables for sampling and aggregation
-    sampling_interval = 1  # Process every 10th frame
-    frame_count = 0
     cheating_buffer = []
-    buffer_duration = 5  # 1 minute buffer
+    buffer_duration = 10  # 1 minute buffer
     
     with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5) as face_mesh:
         while video_feed_active:
@@ -345,58 +215,102 @@ def generate_video_feed(username):
             frame_rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
             img_h, img_w = frame.shape[:2]
 
-            frame_count += 1
-            process_frame = frame_count % sampling_interval == 0
+            detect_objects(frame)
 
-            if process_frame:
-                detect_objects(frame)
-
-                pil_image = Image.fromarray(frame_rgb)
-                anti_spoofing_label, confidence = predict_anti_spoofing(pil_image)
+            pil_image = Image.fromarray(frame_rgb)
+            anti_spoofing_label, confidence = predict_anti_spoofing(pil_image)
                 
-                color = (0, 255, 0) if anti_spoofing_label == "real" else (0, 0, 255)
-                cv.putText(frame, f"Anti-Spoofing: {anti_spoofing_label} ({confidence:.2f})", 
-                           (20, 280), cv.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            # color = (0, 255, 0) if anti_spoofing_label == "real" else (0, 0, 255)                
+            # cv.putText(frame, f"Anti-Spoofing: {anti_spoofing_label} ({confidence:.2f})", (20, 280), cv.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-                if sound_detected:
-                    cv.circle(frame, (600, 50), 20, (0, 0, 255), -1)  # Red dot
+            if sound_detected:
+                cv.circle(frame, (600, 50), 20, (0, 0, 255), -1)  # Red dot
 
-                results = face_mesh.process(frame_rgb)
-                if results.multi_face_landmarks:
-                    # ... (rest of the face mesh processing code remains the same)
+            results = face_mesh.process(frame_rgb)
+            if results.multi_face_landmarks:
+                mesh_points = np.array([np.multiply([p.x, p.y], [img_w, img_h]).astype(int) for p in results.multi_face_landmarks[0].landmark])
 
-                    cheating_votes = sum([
-                        eye_cheating, 
-                        head_cheating, 
-                        sound_detected, 
-                        multiple_persons_detected, 
-                        book_detected, 
-                        phone_detected,
-                        anti_spoofing_label != "real"
-                    ])
-                    is_cheating = cheating_votes >= 2
+                (l_cx, l_cy), l_radius = cv.minEnclosingCircle(mesh_points[LEFT_IRIS])
+                (r_cx, r_cy), r_radius = cv.minEnclosingCircle(mesh_points[RIGHT_IRIS])
+                iris_center_left = np.array([l_cx, l_cy], dtype=np.int32)
+                iris_center_right = np.array([r_cx, r_cy], dtype=np.int32)
+
+                # cv.circle(frame, iris_center_left, int(l_radius), (0, 255, 0), 1)
+                # cv.circle(frame, iris_center_right, int(r_radius), (0, 255, 0), 1)
+                # cv.circle(frame, iris_center_left, int(l_radius), (0, 255, 0), 1)
+                # cv.circle(frame, iris_center_right, int(r_radius), (0, 255, 0), 1)
+                # cv.circle(frame, mesh_points[L_H_LEFT][0], 1, (0, 255, 0), 1)
+                # cv.circle(frame, mesh_points[L_H_RIGHT][0], 1, (0, 255, 0), 1)
+                # cv.circle(frame, mesh_points[R_H_LEFT][0], 1, (0, 255, 0), 1)
+                # cv.circle(frame, mesh_points[R_H_RIGHT][0], 1, (0, 255, 0), 1)
+
+                iris_pos, gaze_ratio = iris_position(iris_center_right, mesh_points[R_H_RIGHT][0], mesh_points[R_H_LEFT][0])
+                eye_cheating = iris_pos != "CENTER"
+                # cv.putText(frame, iris_pos, (50, 50), cv.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv.LINE_AA)
+                
+                face_2d = []
+                face_3d = []
+                for face_landmarks in results.multi_face_landmarks:
+                    for idx, lm in enumerate(face_landmarks.landmark):
+                        if idx in [33, 263, 1, 61, 291, 199]:
+                            if idx == 1:
+                                nose_2d = (lm.x * img_w, lm.y * img_h)
+                                nose_3d = (lm.x * img_w, lm.y * img_h, lm.z * 3000)
+                            x, y = int(lm.x * img_w), int(lm.y * img_h)
+                            face_2d.append([x, y])
+                            face_3d.append([x, y, lm.z])
+
+                face_2d = np.array(face_2d, dtype=np.float64)
+                face_3d = np.array(face_3d, dtype=np.float64)
+
+                focal_length = 1 * img_w
+                cam_matrix = np.array([[focal_length, 0, img_w / 2],
+                                       [0, focal_length, img_h / 2],
+                                       [0, 0, 1]])
+                distortion_matrix = np.zeros((4, 1), dtype=np.float64)
+
+                ret, rotation_vec, translation_vec = cv.solvePnP(face_3d, face_2d, cam_matrix, distortion_matrix)
+                rmat, jac = cv.Rodrigues(rotation_vec)
+                angles, mtxR, mtxQ, Qx, Qy, Qz = cv.RQDecomp3x3(rmat)
+
+                x = angles[0] * 360
+                y = angles[1] * 360
+                z = angles[2] * 360
+
+                head_cheating = abs(y) > 10 or abs(x) > 10
+
+                cheating_votes = sum([
+                    eye_cheating, 
+                    head_cheating, 
+                    sound_detected, 
+                    multiple_persons_detected, 
+                    book_detected, 
+                    phone_detected,
+                    anti_spoofing_label != "real"
+                ])
+                is_cheating = cheating_votes >= 2
 
                     # Add current cheating status to the buffer
-                    current_time = time.time()
-                    cheating_buffer.append((current_time, is_cheating))
+                current_time = time.time()
+                cheating_buffer.append((current_time, is_cheating))
 
                     # Remove old entries from the buffer
-                    cheating_buffer = [entry for entry in cheating_buffer if current_time - entry[0] <= buffer_duration]
+                cheating_buffer = [entry for entry in cheating_buffer if current_time - entry[0] <= buffer_duration]
 
                     # Calculate the majority cheating status for the last minute
-                    cheating_count = sum(1 for _, cheating in cheating_buffer if cheating)
-                    majority_cheating = cheating_count > len(cheating_buffer) / 2
+                cheating_count = sum(1 for _, cheating in cheating_buffer if cheating)
+                majority_cheating = cheating_count > len(cheating_buffer) / 2
 
-                    elapsed_time = current_time - start_time
-                    user_cheating_data[username].append((elapsed_time, majority_cheating))
+                elapsed_time = current_time - start_time
+                user_cheating_data[username].append((elapsed_time, majority_cheating))
 
-                    color = (0, 0, 255) if majority_cheating else (0, 255, 0)
-                    border_thickness = 10
+                color = (0, 0, 255) if majority_cheating else (0, 255, 0)
+                border_thickness = 10
                     # Add colored border to the frame
-                    frame = cv.copyMakeBorder(frame, border_thickness, border_thickness, border_thickness, border_thickness, 
+                frame = cv.copyMakeBorder(frame, border_thickness, border_thickness, border_thickness, border_thickness, 
                                               cv.BORDER_CONSTANT, value=color)
-                    text = "CHEATING DETECTED" if majority_cheating else "NO CHEATING DETECTED"
-                    cv.putText(frame, text, (20, 50), cv.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+                text = "CHEATING DETECTED" if majority_cheating else "NO CHEATING DETECTED"
+                cv.putText(frame, text, (20, 50), cv.FONT_HERSHEY_SIMPLEX, 1, color, 2)
 
                 # Display individual module results
                 # cv.putText(frame, f"Eye: {'Cheating' if eye_cheating else 'OK'}", (20, 100), cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
@@ -476,21 +390,51 @@ async def schedule_exam_page(request: Request):
 async def student_list_page(request: Request):
     return templates.TemplateResponse("studentsList.html", {"request": request})
 
-# @app.post("/login")
-# async def login(username: str = Form(...), password: str = Form(...)):
-#     if username in fake_user_db and password == fake_user_db[username]["password"]:
-#         global current_user
-#         current_user = username
-#         if username == "admin":
-#             return RedirectResponse(url="/teachersMain", status_code=302)
-#         return RedirectResponse(url="/dashboard", status_code=302)
-#     return {"message": "Invalid credentials"}
+# Login route (POST)
+@app.post("/login")
+async def login(
+    username: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    global current_user
+    user = db.query(models.User).filter(
+        models.User.username == username,
+        models.User.password == password
+    ).first()
+    
+    if user:
+        current_user = username  # Store the user's username in the global variable
+        if username == "admin" and password == "admin":
+            return RedirectResponse(url="/teachersMain", status_code=302)  # Redirect to admin page
+        return RedirectResponse(url="/dashboard", status_code=302)
+    return templates.TemplateResponse("login.html", {"request": Request, "msg": "Invalid credentials"})
 
+# Dashboard route (GET)
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request):
     if current_user:
         return templates.TemplateResponse("dashboard.html", {"request": request, "user": current_user})
     return RedirectResponse(url="/")
+
+# Admin route (GET)
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_dashboard(request: Request):
+    if current_user == "admin":
+        db: Session = SessionLocal()
+        try:
+            users = db.query(models.User.username).filter(models.User.username != "admin").distinct().all()
+            users = [user.username for user in users]
+        finally:
+            db.close()
+        return templates.TemplateResponse("admin.html", {"request": request, "users": users})
+    return RedirectResponse(url="/")
+
+# @app.get("/dashboard", response_class=HTMLResponse)
+# async def dashboard(request: Request):
+#     if current_user:
+#         return templates.TemplateResponse("dashboard.html", {"request": request, "user": current_user})
+#     return RedirectResponse(url="/")
 
 @app.get("/admin/user/{username}")
 async def admin_user_dashboard(username: str):
@@ -561,6 +505,50 @@ async def toggle_video_feed():
         if video_cap is not None:
             video_cap.release()  # Release the camera
     return {"status": "active" if video_feed_active else "inactive"}
+
+# Route to create a user with error handling
+@app.post("/users/", status_code=status.HTTP_201_CREATED)
+async def create_user(user: UserBase, db: db_dependency):
+    existing_user = db.query(models.User).filter(
+        (models.User.username == user.username) | (models.User.password == user.password)
+    ).first()
+
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this username or password already exists")
+
+    # Create a new user entry in the database
+    new_user = models.User(username=user.username, password=user.password)
+    db.add(new_user)
+    db.commit()
+    return new_user
+
+@app.post("/add_student")
+async def add_student(request:Request,username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+    # Check if the user already exists
+    existing_user = db.query(User).filter(User.username == username).first()  # Use 'User' class here
+    if existing_user:
+        return {"error": "User already exists"}
+    
+    # Add the new user
+    new_user = User(username=username, password=password)  # Use 'User' class here
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    return templates.TemplateResponse("studentsList.html", {"request": request})
+
+
+# Route to fetch user information based on username and password
+@app.get("/users/{username}", status_code=status.HTTP_200_OK)
+async def read_user(username: str, password: str, db: db_dependency):
+    user = db.query(models.User).filter(
+        models.User.username == username,
+        models.User.password == password
+    ).first()
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
